@@ -1,0 +1,21 @@
+# Unreal generated/build folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Unreal assets
+*.uasset
+*.umap
+
+# IDE files
+.idea/
+.vs/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Never include engine source
+Engine/
