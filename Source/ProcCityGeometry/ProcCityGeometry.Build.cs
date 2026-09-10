@@ -12,7 +12,7 @@ public class ProcCityGeometry : ModuleRules
         {
             "Core",
             "CoreUObject",     
-            "GeometryCore",    
+            "GeometryCore",  
             "GeometryAlgorithms", 
         });
 
