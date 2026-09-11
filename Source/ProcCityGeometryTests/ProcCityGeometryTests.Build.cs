@@ -9,7 +9,12 @@ public class ProcCityGeometryTests : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new string[]
         {
-            "Core", "CoreUObject", "ProcCityGeometry", "GeometryCore"
+            "Core", 
+            "CoreUObject", 
+            "ProcCityGeometry", 
+            "Engine",
+            "GeometryCore", 
+            "ProceduralMeshComponent"
         });
     }
 }

@@ -3,6 +3,30 @@
 #include "CoreMinimal.h"
 #include "ProcCityGeometryTypes.generated.h"
 
+
+/** -------------------------------------------------------------------------------------------
+ * The single convention boundary between ProcCity 2D geometry and the UE 3D world.
+ *
+ * ==== Convention declarations (all upper-layer code depends on these; do not change) ====
+ *
+ * 1. FPolygon2D uses "algebraic CCW": the shoelace signed area is positive.
+ *    This is independent of handedness and is a purely numerical convention.
+ *
+ * 2. Mapping to the world: Poly.X -> World.X, Poly.Y -> World.Y, Z is provided by the caller.
+ *
+ * 3. Visual note: because the UE top view (screen right = +Y, screen up = +X) is mirrored
+ *    relative to the paper coordinate system, an algebraically CCW polygon appears clockwise
+ *    in the editor top view. This is expected behavior, not a bug.
+ *
+ * 4. Rendering winding: UE treats "numerically CW" as front-facing. Therefore, indices obtained
+ *    from triangulating a CCW polygon must be flipped so that face normals point toward +Z.
+ *    The Emit* functions in this file handle this uniformly.
+ *
+ * 5. Rotation sign: FOrientedBox2D::Rotation has the same sign and meaning as FRotator::Yaw,
+ *    and can be used directly after FMath::RadiansToDegrees without negation.
+ ------------------------------------------------------------------------------------------- */  
+
+
 /*
  * Global geometric tolerance. Unit is UE world units (cm).
  * At city scale, coordinates can reach 1e6 cm (10 km), and double has about 15–16 significant digits,
@@ -140,12 +164,25 @@ USTRUCT()
 struct PROCCITYGEOMETRY_API FPolygonTriangulation2D
 {
 	GENERATED_BODY()
-
-	UPROPERTY() TArray<FVector2D> Vertices;
 	
-	// Every 3 int32 form a triangle, CCW
-	UPROPERTY() TArray<int32> Indices;
-
+	/**
+	 * One triangle per 3 indices.
+	 * 
+	 * Contract: always algebraically CCW (Cross(B-A, C-A).Z > 0) 
+	 * 
+	 * Enforced by FPolygon2D::Triangulate, independent of the underlying triangulator's 
+	 * output winding.
+	 * 
+	 * Converting to UE render winding (numerically CW is front-facing) is the 
+	 * responsibility of PolygonMeshAdapter.
+	*/
+	
+	UPROPERTY() 
+	TArray<FVector2D> Vertices;
+	
+	UPROPERTY() 
+	TArray<int32> Indices;
+	
 	int32 NumTriangles() const
 	{
 		return Indices.Num() / 3;
@@ -154,5 +191,38 @@ struct PROCCITYGEOMETRY_API FPolygonTriangulation2D
 	bool IsValid() const
 	{
 		return Indices.Num() >= 3 && Indices.Num() % 3 == 0;
+	}
+	
+	// Signed area of Tth triangle. Positive for CCW
+	double SignedArea(int32 T) const
+	{
+		const FVector2D& A = Vertices[Indices[T * 3 + 0]];
+		const FVector2D& B = Vertices[Indices[T * 3 + 1]];
+		const FVector2D& C = Vertices[Indices[T * 3 + 2]];
+		return 0.5 * ((B.X - A.X) * (C.Y - A.Y) - (C.X - A.X) * (B.Y - A.Y));
+	}
+	
+	// Forces each triangle to the specified winding. 
+	// Degenerate triangle (area ≈ 0) are left as it is.
+	void EnforceWinding(EPolyWinding Desired)
+	{
+		const double Sign = (Desired == EPolyWinding::Clockwise) ? -1.0 : 1.0;
+		for (int32 T = 0; T < NumTriangles(); ++T)
+		{
+			if (SignedArea(T) * Sign < 0.0)
+			{
+				Swap(Indices[T * 3 + 1], Indices[T * 3 + 2]);
+			}
+		}
+	}
+	
+	// Contract self-check, for use in tests / check()
+	bool IsAllCounterClockwise(double Tolerance = 0.0) const
+	{
+		for (int32 T = 0; T < NumTriangles(); ++T)
+		{
+			if (SignedArea(T) < Tolerance) { return false; }
+		}
+		return true;
 	}
 };

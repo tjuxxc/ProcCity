@@ -781,6 +781,15 @@ bool FPolygon2D::Triangulate(FPolygonTriangulation2D& OutMesh) const
 		OutMesh.Indices.Add(T.C);
 	}
 	
+	/** 
+	 * FConstrainedDelaunay2d's output winding is not a documented contract 
+	 * (empirically CW in UE5.8, and it may vary with version / FillRule / presence of holes). 
+	 * 
+	 * Here we normalize per-triangle so that FPolygonTriangulation2D's CCW contract holds and
+	 * downstream code does not need to guess.
+	 */
+	OutMesh.EnforceWinding(EPolyWinding::CounterClockwise);
+	
 	return OutMesh.IsValid();
 }
 

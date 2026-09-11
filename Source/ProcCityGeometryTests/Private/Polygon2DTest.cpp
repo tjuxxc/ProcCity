@@ -91,6 +91,78 @@ bool FPolygon2DWindingTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPolygon2DTriangulationWindingTest,
+	"ProcCity.Geometry.Polygon2D.TriangulationWinding", TestFlags)
+
+bool FPolygon2DTriangulationWindingTest::RunTest(const FString& Parameters)
+{
+	// Covers the four cases — convex / concave / with holes / rotated — 
+	// ensuring normalization takes effect in all branches
+	TArray<TPair<FString, FPolygon2D>> Cases;
+	
+	Cases.Emplace(TEXT("Rect"),
+		FPolygon2D::MakeRect(
+			FVector2D(1000, 2000), 
+			FVector2D(500, 300), 25.0));
+	
+	Cases.Emplace(TEXT("Regular9"),
+		FPolygon2D::MakeRegular(
+			FVector2D::ZeroVector, 800.0, 9));
+	
+	// L-shape concave polygon
+	{   
+		FPolygon2D L;
+		L.Outer.Vertices = {
+			FVector2D(0,0), FVector2D(600,0), 
+			FVector2D(600,200), FVector2D(200,200), 
+			FVector2D(200,600), FVector2D(0,600) };
+		
+		L.Normalize();
+		Cases.Emplace(TEXT("LShape"), MoveTemp(L));
+	}
+	
+	// With hole
+	{   
+		FPolygon2D H = FPolygon2D::MakeRect(
+			FVector2D::ZeroVector, 
+			FVector2D(500, 500));
+		
+		FPolyRing Hole;
+		Hole.Vertices = { FVector2D(-150,-150), FVector2D(150,-150),
+						  FVector2D(150,150),   FVector2D(-150,150) };
+		
+		H.Holes.Add(Hole);
+		H.Normalize();
+		
+		Cases.Emplace(TEXT("WithHole"), MoveTemp(H));
+	}
+	
+	for (const auto& Case : Cases)
+	{
+		FPolygonTriangulation2D Tri;
+		TestTrue(*FString::Printf(TEXT("%s: triangulated"), *Case.Key),
+				 Case.Value.Triangulate(Tri));
+		
+		// Contract 1: all triangles are CCW
+		TestTrue(*FString::Printf(TEXT("%s: all triangles CCW"), *Case.Key),
+				 Tri.IsAllCounterClockwise());
+		
+		// Contract 2: area conversation
+		double Sum = 0.0;
+		for (int32 T = 0; T < Tri.NumTriangles(); ++T)
+		{
+			Sum += Tri.SignedArea(T);   
+		}
+		
+		const double Expected = Case.Value.Area();
+		TestTrue(*FString::Printf(
+			TEXT("%s: area conserved (%.2f vs %.2f)"), *Case.Key, Sum, Expected),
+			FMath::IsNearlyEqual(Sum, Expected, Expected * 1e-3));
+	}
+	return true;
+}
+
+
 // ---- Inner holes tests
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPolygon2DHoleTest,
