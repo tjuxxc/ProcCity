@@ -590,9 +590,8 @@ bool FPathCurve::BuildRibbon(const FWidthProfile& Profile,
 	
 	if (Quads.Num() == 0) { return false; }
 	
-	// Single Clipper call over all ribbons. The iterative pairwise version is
-	// O(n) Clipper invocations, each reprocessing the whole accumulated result;
-	// for a city-scale network that is the dominant cost.
+	// CHANGE (A7): single Clipper union over all ribbons. The previous pairwise
+	// loop was O(n) Clipper invocations, each reprocessing the accumulated result.
 	TArray<FPolygon2D> Accum;
 	if (!ProcCityGeometry::UnionPolygons(
 		Quads, TArrayView<const FPolygon2D>(), Accum))
@@ -681,7 +680,6 @@ uint64 FPathCurve::ComputeStableHash() const
 	}
 	return H;
 }
-
 
 
 

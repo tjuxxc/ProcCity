@@ -27,6 +27,49 @@ enum class EPathClass : uint8
 	Highway    = 5
 };
 
+/**
+ * Cross-section of a road, measured from the centreline.
+ *
+ * ==== Side convention ====
+ * "Left" and "Right" are relative to travelling from NodeA to NodeB.
+ * Left is the +90 degree (CCW) side, matching FPathSample::LeftNormal.
+ *
+ * A bounded face traced CCW always keeps its interior on the LEFT of each
+ * half-edge it walks. So a face walking A->B yields LeftTotal(), and a face
+ * walking B->A yields RightTotal(). FPathFace::BoundaryEdgeForward records the
+ * traversal direction so this can be resolved without ambiguity.
+ */
+// CHANGE (A1): explicit asymmetric road cross-section.
+USTRUCT(BlueprintType)
+struct PROCCITYGEOMETRY_API FRoadCrossSection
+{
+	GENERATED_BODY()
+
+	// CHANGE (A1): carriageway half-width on the left side (cm, centerline -> kerb).
+	UPROPERTY() double LeftHalfWidth  = 400.0;
+	// CHANGE (A1): carriageway half-width on the right side (cm, centerline -> kerb).
+	UPROPERTY() double RightHalfWidth = 400.0;
+	// CHANGE (A1): extra left-side verge/sidewalk width beyond LeftHalfWidth (cm).
+	UPROPERTY() double LeftSidewalk   = 200.0;
+	// CHANGE (A1): extra right-side verge/sidewalk width beyond RightHalfWidth (cm).
+	UPROPERTY() double RightSidewalk  = 200.0;
+
+	double LeftTotal() const { return LeftHalfWidth + LeftSidewalk; }
+	double RightTotal() const { return RightHalfWidth + RightSidewalk; }
+	double FullWidth() const { return LeftTotal() + RightTotal(); }
+	double CarriagewayOffset() const { return (LeftHalfWidth - RightHalfWidth) * 0.5; }
+
+	static FRoadCrossSection Symmetric(double HalfWidth, double Sidewalk)
+	{
+		FRoadCrossSection Section;
+		Section.LeftHalfWidth = HalfWidth;
+		Section.RightHalfWidth = HalfWidth;
+		Section.LeftSidewalk = Sidewalk;
+		Section.RightSidewalk = Sidewalk;
+		return Section;
+	}
+};
+
 /** A node in the planar network: an intersection, an endpoint, or a curve break. */
 USTRUCT(BlueprintType)
 struct PROCCITYGEOMETRY_API FPathNode
@@ -62,12 +105,9 @@ struct PROCCITYGEOMETRY_API FPathEdge
 	UPROPERTY() int32 NodeB = INDEX_NONE;
 	
 	UPROPERTY() EPathClass Class = EPathClass::Local;
-	
-	/** Half-width of the carriageway in cm (center line to kerb). */
-	UPROPERTY() double HalfWidth = 400.0;
-	
-	/** Extra half-width reserved for sidewalk/verge beyond HalfWidth. */
-	UPROPERTY() double SidewalkWidth = 200.0;
+
+	// CHANGE (A2): asymmetric cross-section replaces symmetric HalfWidth/SidewalkWidth.
+	UPROPERTY() FRoadCrossSection Section;
 	
 	/** Index of the originating FPathCurve, or INDEX_NONE for synthetic edges. */
 	UPROPERTY() int32 SourceCurveId = INDEX_NONE;
@@ -76,8 +116,8 @@ struct PROCCITYGEOMETRY_API FPathEdge
 	UPROPERTY() double SourceStartDistance = 0.0;
 	UPROPERTY() double SourceEndDistance = 0.0;
 	
-	/** Total half-width including sidewalk; what block extraction insets by. */
-	double TotalHalfWidth() const { return HalfWidth + SidewalkWidth; }
+	// CHANGE (A2): deprecated compatibility shim for legacy callers.
+	double TotalHalfWidth() const { return FMath::Max(Section.LeftTotal(), Section.RightTotal()); }
 	
 	int32 OtherNode(int32 Node) const
 	{
@@ -103,6 +143,24 @@ struct PROCCITYGEOMETRY_API FPathFace
 	 * frontage class: FBlockEdgeFrontage reads Edges[BoundaryEdges[i]].Class.
 	 */
 	UPROPERTY() TArray<int32> BoundaryEdges;
+
+	/**
+	 * True when boundary segment i traverses its edge from NodeA to NodeB.
+	 * Parallel to BoundaryEdges. Determines which side of the road this face
+	 * borders, and therefore which half-width it must yield.
+	 */
+	UPROPERTY() TArray<bool> BoundaryEdgeForward;
+
+	/**
+	 * Edges traversed in both directions during the face walk, i.e. graph bridges
+	 * (cut edges) that dangle into this face rather than bounding it.
+	 *
+	 * Removed from Shape/BoundaryNodes/BoundaryEdges so the boundary stays a simple
+	 * polygon. Kept here because they still consume land: ExtractBlockPolygons
+	 * subtracts their road corridor, which is how a cul-de-sac carves a slot into
+	 * an otherwise solid block.
+	 */
+	UPROPERTY() TArray<int32> InteriorEdges;
 	
 	/** True for the single unbounded face; it must be discarded by callers. */
 	UPROPERTY() bool bIsOuterFace = false;
@@ -143,9 +201,9 @@ struct PROCCITYGEOMETRY_API FPathNetworkBuildParams
 	 * short stubs (tessellation leftovers, curves ending mid-block) are noise.
 	 * Set to 0 to prune every dead end.
 	 *
-	 * Note: kept spurs still cannot bound a face. ExtractFaces tolerates them
-	 * because the traversal walks out and back along the spur, and the resulting
-	 * zero-area lobe is removed by Simplify. Faces below MinFaceArea are dropped.
+	 * CHANGE (B2): kept spurs still cannot bound a face. ExtractFaces must explicitly
+	 * collapse out-and-back bridge excursions so Shape/BoundaryEdges stay aligned;
+	 * this cannot be deferred to FPolyRing::Simplify.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ProcCity|Geometry")
 	double MaxPrunedSpurLength = 0.0;
@@ -159,8 +217,8 @@ struct PROCCITYGEOMETRY_API FPathNetworkInput
 	
 	UPROPERTY() FPathCurve Curve;
 	UPROPERTY() EPathClass Class = EPathClass::Local;
-	UPROPERTY() double HalfWidth = 400.0;
-	UPROPERTY() double SidewalkWidth = 200.0;
+	// CHANGE (A3): input now carries asymmetric road section data.
+	UPROPERTY() FRoadCrossSection Section;
 };
 
 /**
@@ -191,11 +249,13 @@ public:
 	/** Queue a road. Returns the SourceCurveId assigned. */
 	int32 AddPath(const FPathCurve& Curve, EPathClass Class, 
 		double HalfWidth, double SidewalkWidth);
+	int32 AddPath(const FPathCurve& Curve, EPathClass Class, const FRoadCrossSection& Section);
 	int32 AddPath(const FPathNetworkInput& Input);
 	
 	/** Convenience: add every outer edge of a polygon as a closed loop of roads. */
 	int32 AddPolygonBoundary(const FPolygon2D& Polygon, 
 		EPathClass Class, double HalfWidth, double SidewalkWidth);
+	int32 AddPolygonBoundary(const FPolygon2D& Polygon, EPathClass Class, const FRoadCrossSection& Section);
 	
 	/** Tessellate, planarize, weld, prune. Must be called before queries. */
 	bool Build(const FPathNetworkBuildParams& Params = FPathNetworkBuildParams());
@@ -258,7 +318,7 @@ private:
 	 * This ensures incident edges sorted CCW
 	 */
 	void SortIncidentEdges();
-	void PruneDeadEnds(double MinEdgeLength);
+	void PruneDeadEnds(double MaxSpurLength);
 	
 	/** Outgoing direction of Edge as seen from Node. */
 	FVector2D OutgoingDirection(int32 NodeIndex, int32 EdgeIndex) const;
@@ -268,9 +328,6 @@ private:
 	TArray<FPathEdge> Edges;
 	bool bBuilt = false;
 };
-
-
-
 
 
 

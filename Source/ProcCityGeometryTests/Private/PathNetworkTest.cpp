@@ -31,6 +31,19 @@ namespace
 						EPathClass::Local, HalfWidth, Sidewalk);
 		}
 	}
+
+	// CHANGE (B3): helper for corridor-carving assertions.
+	bool ContainsAnyBlock(TArrayView<const FPolygon2D> Blocks, const FVector2D& P)
+	{
+		for (const FPolygon2D& Block : Blocks)
+		{
+			if (Block.Contains(P))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 }
 
 // ------------- Spatial index ------------------
@@ -420,6 +433,163 @@ bool FPathNetworkDeterminismTest::RunTest(const FString& Parameters)
 		Far.ExtractBlockPolygons(10000.0, FarBlocks));
 	TestEqual(TEXT("4 far blocks"), FarBlocks.Num(), 4);
 	
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPathNetworkAsymmetricWidthTest,
+	"ProcCity.Geometry.PathNetwork.AsymmetricWidth", TestFlags)
+
+bool FPathNetworkAsymmetricWidthTest::RunTest(const FString& Parameters)
+{
+	FPathNetwork Net;
+	const TArray<FVector2D> Outer = {
+		FVector2D(0, 0), FVector2D(10000, 0),
+		FVector2D(10000, 6000), FVector2D(0, 6000)};
+	Net.AddPath(FPathCurve::MakePolyline(Outer, true),
+		EPathClass::Local, 0.0, 0.0);
+
+	FRoadCrossSection Section;
+	Section.LeftHalfWidth = 1500.0;
+	Section.LeftSidewalk = 500.0;
+	Section.RightHalfWidth = 400.0;
+	Section.RightSidewalk = 100.0;
+	Net.AddPath(FPathCurve::MakeLine(FVector2D(5000, 0), FVector2D(5000, 6000)),
+		EPathClass::Arterial, Section);
+
+	TestTrue(TEXT("Build"), Net.Build());
+
+	TArray<FPolygon2D> Blocks;
+	TestTrue(TEXT("Extract blocks"), Net.ExtractBlockPolygons(100.0, Blocks));
+	TestEqual(TEXT("Two flanking blocks"), Blocks.Num(), 2);
+
+	FBox2D LeftBox(ForceInit);
+	FBox2D RightBox(ForceInit);
+	for (const FPolygon2D& Block : Blocks)
+	{
+		const FBox2D B = Block.Bounds();
+		if (B.GetCenter().X < 5000.0)
+		{
+			LeftBox = B;
+		}
+		else
+		{
+			RightBox = B;
+		}
+	}
+
+	// CHANGE (A5): each face yields only its own side of the shared road.
+	TestTrue(TEXT("Left block offsets by left total"),
+		FMath::IsNearlyEqual(5000.0 - LeftBox.Max.X, 2000.0, 1.0));
+	TestTrue(TEXT("Right block offsets by right total"),
+		FMath::IsNearlyEqual(RightBox.Min.X - 5000.0, 500.0, 1.0));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPathNetworkKeptSpurTest,
+	"ProcCity.Geometry.PathNetwork.KeptSpur", TestFlags)
+
+bool FPathNetworkKeptSpurTest::RunTest(const FString& Parameters)
+{
+	FPathNetwork Net;
+	const TArray<FVector2D> Ring = {
+		FVector2D(0, 0), FVector2D(20000, 0),
+		FVector2D(20000, 10000), FVector2D(0, 10000)};
+	Net.AddPath(FPathCurve::MakePolyline(Ring, true),
+		EPathClass::Local, 300.0, 100.0);
+	Net.AddPath(FPathCurve::MakeLine(FVector2D(20000, 5000), FVector2D(8000, 5000)),
+		EPathClass::Local, 300.0, 100.0);
+
+	FPathNetworkBuildParams Params;
+	Params.MaxPrunedSpurLength = 5000.0;
+	TestTrue(TEXT("Build"), Net.Build(Params));
+
+	int32 DeadEnds = 0;
+	for (const FPathNode& Node : Net.GetNodes())
+	{
+		if (Node.Degree() == 1)
+		{
+			++DeadEnds;
+		}
+	}
+	TestTrue(TEXT("Spur survived pruning"), DeadEnds > 0);
+
+	TArray<FPathFace> Faces;
+	TestTrue(TEXT("Extract faces"), Net.ExtractFaces(Faces));
+
+	const FPathFace* BoundedFace = nullptr;
+	for (const FPathFace& Face : Faces)
+	{
+		if (!Face.bIsOuterFace)
+		{
+			BoundedFace = &Face;
+			break;
+		}
+	}
+	TestNotNull(TEXT("Bounded face exists"), BoundedFace);
+	if (!BoundedFace) { return false; }
+
+	TestFalse(TEXT("Bounded face has no self-intersection"), BoundedFace->Shape.HasSelfIntersection());
+	TestEqual(TEXT("Bounded face remains ring quad"), BoundedFace->Shape.Outer.NumVertices(), 4);
+	TestEqual(TEXT("BoundaryEdges aligned to shape"),
+		BoundedFace->BoundaryEdges.Num(), BoundedFace->Shape.Outer.NumVertices());
+	TestEqual(TEXT("BoundaryEdgeForward aligned to shape"),
+		BoundedFace->BoundaryEdgeForward.Num(), BoundedFace->Shape.Outer.NumVertices());
+	TestTrue(TEXT("Face area remains 200m x 100m"),
+		FMath::IsNearlyEqual(BoundedFace->Area, 20000.0 * 10000.0, 1.0));
+	TestTrue(TEXT("Spur recorded as interior edge"), BoundedFace->InteriorEdges.Num() >= 1);
+
+	TSet<int32> UniqueEdges;
+	for (int32 EdgeIdx : BoundedFace->BoundaryEdges)
+	{
+		UniqueEdges.Add(EdgeIdx);
+	}
+	TestEqual(TEXT("No duplicate boundary edge indices"),
+		UniqueEdges.Num(), BoundedFace->BoundaryEdges.Num());
+
+	TArray<FPolygon2D> Blocks;
+	TestTrue(TEXT("Extract carved blocks"), Net.ExtractBlockPolygons(100.0, Blocks));
+	// CHANGE (B3): interior spur corridor is subtracted from the block pieces.
+	TestFalse(TEXT("Spur centerline is carved out"),
+		ContainsAnyBlock(Blocks, FVector2D(14000, 5000)));
+	TestTrue(TEXT("Beyond spur tip still belongs to some block"),
+		ContainsAnyBlock(Blocks, FVector2D(4000, 5000)));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPathNetworkSpurVsThroughTest,
+	"ProcCity.Geometry.PathNetwork.SpurVsThrough", TestFlags)
+
+bool FPathNetworkSpurVsThroughTest::RunTest(const FString& Parameters)
+{
+	auto CountBlocks = [&](double EndX) -> int32
+	{
+		FPathNetwork Net;
+		const TArray<FVector2D> Ring = {
+			FVector2D(0, 0), FVector2D(20000, 0),
+			FVector2D(20000, 10000), FVector2D(0, 10000)};
+		Net.AddPath(FPathCurve::MakePolyline(Ring, true),
+			EPathClass::Local, 300.0, 100.0);
+		Net.AddPath(FPathCurve::MakeLine(FVector2D(20000, 5000), FVector2D(EndX, 5000)),
+			EPathClass::Local, 300.0, 100.0);
+
+		FPathNetworkBuildParams Params;
+		Params.MaxPrunedSpurLength = 5000.0;
+		if (!Net.Build(Params))
+		{
+			return INDEX_NONE;
+		}
+
+		TArray<FPolygon2D> Blocks;
+		if (!Net.ExtractBlockPolygons(100.0, Blocks))
+		{
+			return 0;
+		}
+		return Blocks.Num();
+	};
+
+	// CHANGE (B2): collapsed interior bridges preserve one bounded face for cul-de-sacs.
+	TestEqual(TEXT("Cul-de-sac yields one U-shaped parcel"), CountBlocks(8000.0), 1);
+	TestEqual(TEXT("Through road yields two parcels"), CountBlocks(0.0), 2);
 	return true;
 }
 
