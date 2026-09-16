@@ -45,9 +45,13 @@ struct PROCCITYGEOMETRY_API FRoadCrossSection
 {
 	GENERATED_BODY()
 
+	// CHANGE (A1): carriageway half-width on the left side (cm, centerline -> kerb).
 	UPROPERTY() double LeftHalfWidth  = 400.0;
+	// CHANGE (A1): carriageway half-width on the right side (cm, centerline -> kerb).
 	UPROPERTY() double RightHalfWidth = 400.0;
+	// CHANGE (A1): extra left-side verge/sidewalk width beyond LeftHalfWidth (cm).
 	UPROPERTY() double LeftSidewalk   = 200.0;
+	// CHANGE (A1): extra right-side verge/sidewalk width beyond RightHalfWidth (cm).
 	UPROPERTY() double RightSidewalk  = 200.0;
 
 	double LeftTotal() const { return LeftHalfWidth + LeftSidewalk; }
@@ -324,7 +328,6 @@ private:
 	TArray<FPathEdge> Edges;
 	bool bBuilt = false;
 };
-
 
 
 
