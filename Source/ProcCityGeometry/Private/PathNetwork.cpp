@@ -507,10 +507,22 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 			}
 			Cleaned.Add(Hi);
 		}
-		while (Cleaned.Num() >= 2 && Cleaned[0] == Twin(Cleaned.Last()))
+		// CHANGE (B2): avoid repeated RemoveAt(0) shifting by advancing a seam index.
+		int32 SeamStart = 0;
+		while ((Cleaned.Num() - SeamStart) >= 2 && Cleaned[SeamStart] == Twin(Cleaned.Last()))
 		{
 			Removed.Add(Cleaned.Pop() >> 1);
-			Cleaned.RemoveAt(0);
+			++SeamStart;
+		}
+		if (SeamStart > 0)
+		{
+			TArray<int32> SeamTrimmed;
+			SeamTrimmed.Reserve(Cleaned.Num() - SeamStart);
+			for (int32 Idx = SeamStart; Idx < Cleaned.Num(); ++Idx)
+			{
+				SeamTrimmed.Add(Cleaned[Idx]);
+			}
+			Cleaned = MoveTemp(SeamTrimmed);
 		}
 		if (Cleaned.Num() < 3) { continue; }
 		Cycle = MoveTemp(Cleaned);
@@ -809,7 +821,6 @@ bool FPathNetwork::ValidateTopology(FString* OutError) const
 	}
 	return true;
 }
-
 
 
 
