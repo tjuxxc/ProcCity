@@ -31,8 +31,8 @@ namespace
 		}
 	}
 	
-	/** Appends instead of resetting, so multiple sources can fill one array. */
-	void AppendAsUEGeneralPolygons(TArrayView<const FPolygon2D> In,
+	// CHANGE (A7): append both operands into one array; PolygonsUnion unions a single list.
+	void AppendAsGeneralPolygons(TArrayView<const FPolygon2D> In,
 								 TArray<FGeneralPolygon2d>& Out)
 	{
 		Out.Reserve(Out.Num() + In.Num());
@@ -307,8 +307,8 @@ namespace ProcCityGeometry
 		TArrayView<const FPolygon2D> InB, TArray<FPolygon2D>& Out)
 	{
 		TArray<FGeneralPolygon2d> Combined;
-		AppendAsUEGeneralPolygons(InA, Combined);
-		AppendAsUEGeneralPolygons(InB, Combined);
+		AppendAsGeneralPolygons(InA, Combined);
+		AppendAsGeneralPolygons(InB, Combined);
 		
 		if (Combined.Num() == 0) { Out.Reset(); return false; }
 		

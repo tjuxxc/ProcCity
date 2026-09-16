@@ -3,6 +3,8 @@
 #include "ProcCityGeometry/SpatialIndex.h"
 #include "ProcCityGeometry/PolygonOffset.h"
 #include "Intersection/IntrSegment2Segment2.h"
+#include "Algo/Reverse.h"
+#include "Algo/Unique.h"
 
 
 using namespace ProcCityGeometry;
@@ -28,11 +30,16 @@ void FPathNetwork::Reset()
 int32 FPathNetwork::AddPath(const FPathCurve& Curve, 
 	EPathClass Class, double HalfWidth, double SidewalkWidth)
 {
+	// CHANGE (A3): keep legacy overload by forwarding to a symmetric section.
+	return AddPath(Curve, Class, FRoadCrossSection::Symmetric(HalfWidth, SidewalkWidth));
+}
+
+int32 FPathNetwork::AddPath(const FPathCurve& Curve, EPathClass Class, const FRoadCrossSection& Section)
+{
 	FPathNetworkInput In;
 	In.Curve = Curve;
 	In.Class = Class;
-	In.HalfWidth = HalfWidth;
-	In.SidewalkWidth = SidewalkWidth;
+	In.Section = Section;
 	return AddPath(In);
 }
 
@@ -46,10 +53,18 @@ int32 FPathNetwork::AddPath(const FPathNetworkInput& Input)
 int32 FPathNetwork::AddPolygonBoundary(const FPolygon2D& Polygon, 
 	EPathClass Class, double HalfWidth, double SidewalkWidth)
 {
+	// CHANGE (A3): keep legacy overload by forwarding to a symmetric section.
+	return AddPolygonBoundary(
+		Polygon, Class, FRoadCrossSection::Symmetric(HalfWidth, SidewalkWidth));
+}
+
+int32 FPathNetwork::AddPolygonBoundary(const FPolygon2D& Polygon,
+	EPathClass Class, const FRoadCrossSection& Section)
+{
 	if (!Polygon.IsValid()){ return INDEX_NONE; }
 	return AddPath(
 		FPathCurve::FromPolygonOuter(Polygon), 
-		Class, HalfWidth, SidewalkWidth);
+		Class, Section);
 }
 
 // ------------- tessellate ------------------
@@ -250,8 +265,8 @@ void FPathNetwork::BuildGraph(
 		E.NodeA = IdxA;
 		E.NodeB = IdxB;
 		E.Class = In.Class;
-		E.HalfWidth = In.HalfWidth;
-		E.SidewalkWidth = In.SidewalkWidth;
+		// CHANGE (A3): persist per-edge asymmetric cross-section.
+		E.Section = In.Section;
 		E.SourceCurveId = S.InputIndex;
 		E.SourceStartDistance = S.StartDistance;
 		E.SourceEndDistance = S.EndDistance;
@@ -292,7 +307,7 @@ void FPathNetwork::SortIncidentEdges()
 	}
 }
 
-void FPathNetwork::PruneDeadEnds(double MaxPrunedSpurLength)
+void FPathNetwork::PruneDeadEnds(double MaxSpurLength)
 {
 	// Iteratively strip degree-1 nodes. A dead-end chain cannot bound a face;
 	// leaving it in would make the traversal walk out and back along the spur,
@@ -301,7 +316,7 @@ void FPathNetwork::PruneDeadEnds(double MaxPrunedSpurLength)
 	TArray<bool> EdgeAlive;
 	EdgeAlive.Init(true, Edges.Num());
 	TArray<int32> Degree;
-	Degree.SetNum(Edges.Num());
+	Degree.SetNum(Nodes.Num());
 	
 	for (int32 n = 0; n < Nodes.Num(); ++n)
 	{
@@ -313,7 +328,7 @@ void FPathNetwork::PruneDeadEnds(double MaxPrunedSpurLength)
 	// long cul-de-sac survives while a short stub is removed entirely.
 	TArray<double> SpurLength;
 	SpurLength.Init(0.0, Nodes.Num());
-	const bool bPruneAll = (MaxPrunedSpurLength <= 0.0);
+	const bool bPruneAll = (MaxSpurLength <= 0.0);
 	
 	bool bChanged = true;
 	while (bChanged)
@@ -331,9 +346,10 @@ void FPathNetwork::PruneDeadEnds(double MaxPrunedSpurLength)
 					Nodes[n].Position, Nodes[Other].Position);
 				const double Accum = SpurLength[n] + EdgeLen;
 				
-				if (!bPruneAll && Accum > MaxPrunedSpurLength)
+				if (!bPruneAll && Accum > MaxSpurLength)
 				{
 					// Long enough to be a genuine cul-de-sac: stop peeling this chain.
+					// CHANGE (B1): freeze marker avoids non-converging re-examination.
 					Degree[n] = -1; // mark as frozen so we do not revisit
 					break;
 				}
@@ -392,7 +408,8 @@ bool FPathNetwork::Build(const FPathNetworkBuildParams& Params)
 	
 	if (Params.bPruneDeadEnds)
 	{
-		PruneDeadEnds(Params.MinEdgeLength);
+		// CHANGE (B1): wire build params through to chain-length spur pruning.
+		PruneDeadEnds(Params.MaxPrunedSpurLength);
 	}
 	
 	SortIncidentEdges();
@@ -419,7 +436,7 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 		return (H & 1) ? Edges[H >> 1].NodeA : Edges[H >> 1].NodeB;
 	};
 	
-	// TODO: Unused
+	// CHANGE (B2): Twin helper is used by both traversal and bridge collapsing.
 	auto Twin = [](int32 H)
 	{
 		return H ^ 1;
@@ -475,10 +492,33 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 		}
 		
 		if (!bOk || Cycle.Num() < 3) { continue; }
+
+		// CHANGE (B2): collapse out-and-back excursions. Removing one twin pair can
+		// expose another, so this is bracket matching with a stack.
+		TArray<int32> Cleaned;
+		TArray<int32> Removed;
+		Cleaned.Reserve(Cycle.Num());
+		for (int32 Hi : Cycle)
+		{
+			if (Cleaned.Num() > 0 && Cleaned.Last() == Twin(Hi))
+			{
+				Removed.Add(Cleaned.Pop() >> 1);
+				continue;
+			}
+			Cleaned.Add(Hi);
+		}
+		while (Cleaned.Num() >= 2 && Cleaned[0] == Twin(Cleaned.Last()))
+		{
+			Removed.Add(Cleaned.Pop() >> 1);
+			Cleaned.RemoveAt(0);
+		}
+		if (Cleaned.Num() < 3) { continue; }
+		Cycle = MoveTemp(Cleaned);
 		
 		FPathFace Face;
 		Face.BoundaryNodes.Reserve(Cycle.Num());
 		Face.BoundaryEdges.Reserve(Cycle.Num());
+		Face.BoundaryEdgeForward.Reserve(Cycle.Num());
 		TArray<FVector2D> Verts;
 		Verts.Reserve(Cycle.Num());
 		
@@ -488,7 +528,14 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 			Verts.Add(Nodes[Src].Position);
 			Face.BoundaryNodes.Add(Src);
 			Face.BoundaryEdges.Add(HalfEdgeIdx >> 1);
+			// CHANGE (A4): even half-edge id means NodeA -> NodeB.
+			Face.BoundaryEdgeForward.Add((HalfEdgeIdx & 1) == 0);
 		}
+
+		Removed.Sort();
+		const int32 UniqueEnd = Algo::Unique(Removed);
+		Removed.SetNum(UniqueEnd);
+		Face.InteriorEdges = MoveTemp(Removed);
 		// Signed area decides bounded vs unbounded, and must be computed BEFORE
 		// FPolygon2D normalization flips the winding.
 		FPolyRing Ring;
@@ -507,6 +554,7 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 			Face.Shape.Outer.Reverse();
 			Algo::Reverse(Face.BoundaryNodes);
 			Algo::Reverse(Face.BoundaryEdges);
+			Algo::Reverse(Face.BoundaryEdgeForward);
 			// After reversing vertices, boundary edge i must still map to the
 			// segment (v_i -> v_i+1); rotate by one to restore that alignment.
 			if (Face.BoundaryEdges.Num() > 1)
@@ -514,6 +562,19 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 				const int32 First = Face.BoundaryEdges[0];
 				Face.BoundaryEdges.RemoveAt(0);
 				Face.BoundaryEdges.Add(First);
+			}
+			if (Face.BoundaryEdgeForward.Num() > 1)
+			{
+				// CHANGE (A4): after Algo::Reverse edges are [e_{n-1} ... e_0], but slot i
+				// must hold e_{n-2-i}; this is a left rotation by one.
+				const bool FirstForward = Face.BoundaryEdgeForward[0];
+				Face.BoundaryEdgeForward.RemoveAt(0);
+				Face.BoundaryEdgeForward.Add(FirstForward);
+			}
+			// CHANGE (A4): reversing the loop flips every traversal direction.
+			for (int32 DirIdx = 0; DirIdx < Face.BoundaryEdgeForward.Num(); ++DirIdx)
+			{
+				Face.BoundaryEdgeForward[DirIdx] = !Face.BoundaryEdgeForward[DirIdx];
 			}
 		}
 		OutFaces.Add(MoveTemp(Face));
@@ -541,15 +602,50 @@ bool FPathNetwork::ExtractBlockPolygons(double MinBlockArea,
 		// non-uniform block shapes in real cities.
 		TArray<double> Insets;
 		Insets.Reserve(Face.BoundaryEdges.Num());
-		for (int32 EdgeIdx : Face.BoundaryEdges)
+		for (int32 i = 0; i < Face.BoundaryEdges.Num(); ++i)
 		{
-			Insets.Add(Edges.IsValidIndex(EdgeIdx) ? Edges[EdgeIdx].TotalHalfWidth() : 0.0);
+			if (!Edges.IsValidIndex(Face.BoundaryEdges[i]))
+			{
+				Insets.Add(0.0);
+				continue;
+			}
+			const FPathEdge& E = Edges[Face.BoundaryEdges[i]];
+			// CHANGE (A5): bounded face yields the width on its traversed side.
+			Insets.Add(Face.BoundaryEdgeForward[i] ? E.Section.LeftTotal() : E.Section.RightTotal());
 		}
 		
 		TArray<FPolygon2D> Pieces;
 		if (!InsetPolygonPerEdge(Face.Shape, Insets, MinBlockArea, Pieces))
 		{
 			continue;  // road corridors consumed the whole face
+		}
+
+		// CHANGE (B3): carve corridors for bridges dangling into this face.
+		if (Face.InteriorEdges.Num() > 0)
+		{
+			TArray<FPolygon2D> Corridors;
+			for (int32 EdgeIdx : Face.InteriorEdges)
+			{
+				if (!Edges.IsValidIndex(EdgeIdx)) { continue; }
+				const FPathEdge& E = Edges[EdgeIdx];
+				const FPathCurve Seg = FPathCurve::MakeLine(
+					Nodes[E.NodeA].Position, Nodes[E.NodeB].Position);
+				FPolygon2D Corridor;
+				if (Seg.BuildRibbonSingle(
+						FWidthProfile::Asymmetric(E.Section.LeftTotal(), E.Section.RightTotal()),
+						ProcCityGeometry::DefaultMaxChordError, Corridor))
+				{
+					Corridors.Add(MoveTemp(Corridor));
+				}
+			}
+			if (Corridors.Num() > 0)
+			{
+				TArray<FPolygon2D> Carved;
+				if (SubtractPolygons(Pieces, Corridors, Carved))
+				{
+					Pieces = MoveTemp(Carved);
+				}
+			}
 		}
 		
 		for (FPolygon2D& P : Pieces)
@@ -575,14 +671,16 @@ bool FPathNetwork::BuildRoadSurfaces(
 	
 	for (const FPathEdge& E : Edges)
 	{
-		const double W = bIncludeSidewalk ? E.TotalHalfWidth() : E.HalfWidth;
 		const FPathCurve Seg = FPathCurve::MakeLine(
 			Nodes[E.NodeA].Position, Nodes[E.NodeB].Position,
 			Nodes[E.NodeA].Elevation, Nodes[E.NodeB].Elevation);
 		
 		FPolygon2D Ribbon;
-		// TODO: Asymmetric WidthProfile is not addressed.
-		if (Seg.BuildRibbonSingle(FWidthProfile::Uniform(W), 
+		// CHANGE (A6): use left/right widths directly from per-edge cross-section.
+		const FWidthProfile Profile = FWidthProfile::Asymmetric(
+			bIncludeSidewalk ? E.Section.LeftTotal() : E.Section.LeftHalfWidth,
+			bIncludeSidewalk ? E.Section.RightTotal() : E.Section.RightHalfWidth);
+		if (Seg.BuildRibbonSingle(Profile, 
 			DefaultMaxChordError, Ribbon))
 		{
 			Quads.Add(MoveTemp(Ribbon));
@@ -590,9 +688,8 @@ bool FPathNetwork::BuildRoadSurfaces(
 	}
 	if (Quads.Num() == 0) { return false; }
 	
-	// Single Clipper call over all ribbons. The iterative pairwise version is
-	// O(n) Clipper invocations, each reprocessing the whole accumulated result;
-	// for a city-scale network that is the dominant cost.
+	// CHANGE (A7): single Clipper union over all ribbons. The previous pairwise
+	// loop was O(n) Clipper invocations, each reprocessing the accumulated result.
 	if (!UnionPolygons(Quads, TArrayView<const FPolygon2D>(), Out))
 	{
 		Out = MoveTemp(Quads);   // degenerate fallback: keep overlapping quads
@@ -687,14 +784,31 @@ bool FPathNetwork::ValidateTopology(FString* OutError) const
 			}
 		}
 	}
+
+	TArray<FPathFace> Faces;
+	if (ExtractFaces(Faces))
+	{
+		for (int32 FaceIdx = 0; FaceIdx < Faces.Num(); ++FaceIdx)
+		{
+			const FPathFace& Face = Faces[FaceIdx];
+			if (Face.Shape.HasSelfIntersection())
+			{
+				// CHANGE (B4): extracted face boundaries must be simple polygons.
+				return Fail(FString::Printf(TEXT("Face %d has self-intersection"), FaceIdx));
+			}
+			const int32 N = Face.Shape.Outer.NumVertices();
+			if (Face.BoundaryEdges.Num() != N)
+			{
+				return Fail(FString::Printf(TEXT("Face %d boundary-edge count mismatch"), FaceIdx));
+			}
+			if (Face.BoundaryEdgeForward.Num() != N)
+			{
+				return Fail(FString::Printf(TEXT("Face %d boundary-direction count mismatch"), FaceIdx));
+			}
+		}
+	}
 	return true;
 }
-
-
-
-
-
-
 
 
 
