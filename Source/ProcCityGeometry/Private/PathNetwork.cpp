@@ -502,7 +502,9 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 		{
 			if (Cleaned.Num() > 0 && Cleaned.Last() == Twin(Hi))
 			{
-				Removed.Add(Cleaned.Pop() >> 1);
+				int32 PoppedHalfEdge = INDEX_NONE;
+				Cleaned.Pop(PoppedHalfEdge);
+				Removed.Add(PoppedHalfEdge >> 1);
 				continue;
 			}
 			Cleaned.Add(Hi);
@@ -511,7 +513,9 @@ bool FPathNetwork::ExtractFaces(TArray<FPathFace>& OutFaces) const
 		int32 SeamStart = 0;
 		while ((Cleaned.Num() - SeamStart) >= 2 && Cleaned[SeamStart] == Twin(Cleaned.Last()))
 		{
-			Removed.Add(Cleaned.Pop() >> 1);
+			int32 PoppedHalfEdge = INDEX_NONE;
+			Cleaned.Pop(PoppedHalfEdge);
+			Removed.Add(PoppedHalfEdge >> 1);
 			++SeamStart;
 		}
 		if (SeamStart > 0)
@@ -821,7 +825,6 @@ bool FPathNetwork::ValidateTopology(FString* OutError) const
 	}
 	return true;
 }
-
 
 
 
