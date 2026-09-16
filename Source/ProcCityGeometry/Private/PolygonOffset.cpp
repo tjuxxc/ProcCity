@@ -31,6 +31,17 @@ namespace
 		}
 	}
 	
+	/** Appends instead of resetting, so multiple sources can fill one array. */
+	void AppendAsUEGeneralPolygons(TArrayView<const FPolygon2D> In,
+								 TArray<FGeneralPolygon2d>& Out)
+	{
+		Out.Reserve(Out.Num() + In.Num());
+		for (const FPolygon2D& P : In)
+		{
+			if (P.IsValid()) { Out.Add(P.ToGeneralPolygon()); }
+		}
+	}
+	
 	void FinalizeResults(TArray<FGeneralPolygon2d>& Raw, double MinArea, 
 		bool bSimplify, TArray<FPolygon2D>& Out)
 	{
@@ -295,22 +306,13 @@ namespace ProcCityGeometry
 	bool UnionPolygons(TArrayView<const FPolygon2D> InA, 
 		TArrayView<const FPolygon2D> InB, TArray<FPolygon2D>& Out)
 	{
-		TArray<FGeneralPolygon2d> GA, GB, Raw;
-		ToUEGeneralPolygon2dArray(InA, GA);
-		ToUEGeneralPolygon2dArray(InB, GB);
-		
-		if (GA.Num() == 0 && GB.Num() == 0) 
-		{
-			Out.Reset(); 
-			return false;
-		}
-		
-		// TODO: Efficiency?
 		TArray<FGeneralPolygon2d> Combined;
-		Combined.Reserve(GA.Num() + GB.Num()); 
-		Combined.Append(MoveTemp(GA));
-		Combined.Append(MoveTemp(GB));
+		AppendAsUEGeneralPolygons(InA, Combined);
+		AppendAsUEGeneralPolygons(InB, Combined);
 		
+		if (Combined.Num() == 0) { Out.Reset(); return false; }
+		
+		TArray<FGeneralPolygon2d> Raw;
 		if (!PolygonsUnion(Combined, Raw, false))
 		{
 			return false;

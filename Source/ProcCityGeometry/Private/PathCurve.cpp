@@ -590,23 +590,14 @@ bool FPathCurve::BuildRibbon(const FWidthProfile& Profile,
 	
 	if (Quads.Num() == 0) { return false; }
 	
-	// Iterative union 
+	// Single Clipper call over all ribbons. The iterative pairwise version is
+	// O(n) Clipper invocations, each reprocessing the whole accumulated result;
+	// for a city-scale network that is the dominant cost.
 	TArray<FPolygon2D> Accum;
-	Accum.Add(Quads[0]);
-	for (int32 i = 1; i < Quads.Num(); ++i)
+	if (!ProcCityGeometry::UnionPolygons(
+		Quads, TArrayView<const FPolygon2D>(), Accum))
 	{
-		TArray<FPolygon2D> Merged;
-		if (ProcCityGeometry::UnionPolygons(Accum, 
-			MakeArrayView(&Quads[i], 1), Merged))
-		{
-			Accum = MoveTemp(Merged);
-		}
-		else
-		{
-			// Kee quads [i] as independent piece if union 
-			// fails to avoid losing data
-			Accum.Add(Quads[i]);
-		}
+		Accum = MoveTemp(Quads);   // degenerate fallback: keep overlapping quads
 	}
 	
 	for (FPolygon2D& P : Accum)
@@ -617,6 +608,7 @@ bool FPathCurve::BuildRibbon(const FWidthProfile& Profile,
 	Out.Sort(
 		[](const FPolygon2D& A, const FPolygon2D& B) 
 		{ return A.Area() > B.Area(); });
+	
 	return Out.Num() > 0;
 }
 
